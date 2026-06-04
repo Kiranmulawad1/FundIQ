@@ -1,0 +1,227 @@
+[project]
+name = "fundiq"
+version = "0.1.0"
+description = "AI funding intelligence platform for EU and German startups"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "Kiran Mulawad", email = "kiranmulawad1@gmail.com" }]
+
+dependencies = [
+    # --- Web framework ---
+    "fastapi>=0.115,<0.116",
+    "uvicorn[standard]>=0.32,<0.33",
+    "python-multipart>=0.0.12,<0.1",
+
+    # --- Data contracts ---
+    "pydantic[email]>=2.9,<3.0",
+    "pydantic-settings>=2.6,<3.0",
+
+    # --- Database (async runtime) ---
+    "sqlmodel>=0.0.22,<0.1",
+    "sqlalchemy[asyncio]>=2.0.35,<2.1",
+    "asyncpg>=0.30,<0.31",
+    "pgvector>=0.3.6,<0.4",
+    "alembic>=1.14,<1.15",
+    "psycopg[binary]>=3.2,<3.3",  # sync driver for Alembic only
+
+    # --- Cache / queue ---
+    "redis[hiredis]>=5.2,<5.3",
+
+    # --- AI agents ---
+    "pydantic-ai>=0.0.14,<0.1",
+    "langgraph>=0.2.50,<0.3",
+    "langsmith>=0.1.140,<0.2",
+    "openai>=1.55,<2.0",
+
+    # --- MCP server ---
+    "mcp>=1.1,<2.0",
+
+    # --- Knowledge graph ---
+    "neo4j>=5.26,<6.0",
+
+    # --- Analytics ---
+    "duckdb>=1.1,<2.0",
+
+    # --- Embeddings + reranker ---
+    # API-backed (Gemini Embedding + Cohere Rerank). httpx is already
+    # in the deps above. ≤2.0 used `sentence-transformers + torch`
+    # locally; that pulled ~2.5GB into the production image and didn't
+    # fit any free-tier host. Reinstall the legacy stack via
+    # `uv pip install "sentence-transformers>=3.3,<4.0" "torch>=2.5,<3.0"`
+    # if you want to A/B compare local vs API embeddings offline.
+
+    # --- Task queue (Hatchet) ---
+    # Hatchet SDK is kept on hand for the Phase 3 migration to a durable
+    # distributed task queue. For now we schedule with APScheduler (zero
+    # infra) and keep the workflow function signatures Hatchet-shaped so
+    # the swap is mechanical when we need persistent retries.
+    "hatchet-sdk>=0.45,<0.50",
+    "apscheduler>=3.10,<4.0",
+
+    # --- Auth (Clerk) ---
+    "pyjwt[crypto]>=2.10,<3.0",
+    "httpx>=0.28,<0.29",
+
+    # --- Observability ---
+    "logfire>=2.6,<3.0",
+    "structlog>=24.4,<25.0",
+    # logfire transitively imports `importlib_metadata` (backport package)
+    # rather than stdlib `importlib.metadata` on 3.13 — pin it explicitly.
+    "importlib-metadata>=8.5,<9.0",
+
+    # --- Utilities ---
+    "tenacity>=9.0,<10.0",  # retries with backoff + jitter
+    "orjson>=3.10,<4.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9.0",
+    "pytest-asyncio>=0.24,<0.25",
+    "pytest-mock>=3.14,<4.0",
+    "pytest-cov>=6.0,<7.0",
+    "httpx>=0.28,<0.29",  # test client
+    "ruff>=0.8,<0.9",
+    "mypy>=1.13,<2.0",
+    "types-redis>=4.6,<5.0",
+    "respx>=0.21,<0.22",  # httpx mocking
+]
+ml = [
+    "xgboost>=2.1,<3.0",
+    "scikit-learn>=1.5,<2.0",
+    "bentoml>=1.3,<2.0",
+    "numpy>=2.0,<3.0",
+    "pandas>=2.2,<3.0",
+    "peft>=0.13,<0.14",   # LoRA
+    "datasets>=3.1,<4.0",
+]
+scrapers = [
+    "playwright>=1.48,<2.0",
+    "beautifulsoup4>=4.12,<5.0",
+    "lxml>=5.3,<6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/app"]
+
+# Make the `scrapers` group install by default so a bare `uv sync` keeps
+# bs4/lxml present (the scrapers under app/scrapers/ import them). The `ml`
+# group stays opt-in — torch + xgboost are heavy and only the FRS pipeline
+# needs them.
+[tool.uv]
+default-groups = ["dev", "scrapers"]
+
+# ---------------------------------------------------------------------------
+# Ruff — lint + format. Replaces black, isort, flake8, pyupgrade, etc.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["backend/alembic/versions"]
+
+[tool.ruff.lint]
+# Start broad, then narrow with ignores so deliberate opt-outs are visible.
+select = [
+    "E", "W",      # pycodestyle
+    "F",           # pyflakes
+    "I",           # isort
+    "B",           # flake8-bugbear
+    "C4",          # comprehensions
+    "UP",          # pyupgrade
+    "SIM",         # simplify
+    "RUF",         # ruff-specific
+    "S",           # bandit (security)
+    "ASYNC",       # async pitfalls
+    "T20",         # no print
+    "PT",          # pytest style
+    "PL",          # pylint subset
+    "TCH",         # type-checking imports
+    "TID",         # tidy imports
+    "ANN",         # annotations
+    "N",           # naming
+]
+ignore = [
+    "ANN401",      # allow `Any` in narrow places (PydanticAI tool sigs)
+    "PLR0913",     # function arg count — agent factories legitimately need many
+    "S101",        # asserts allowed in tests (per-file ignore below also)
+    "PLR2004",     # magic values — too noisy in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"backend/tests/**" = ["ANN", "S101", "PLR2004", "S105", "S106"]
+"backend/alembic/env.py" = ["ANN", "T20"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+combine-as-imports = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ---------------------------------------------------------------------------
+# mypy — strict. Errors loudly on Any leakage, missing annotations, etc.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_decorators = true
+plugins = ["pydantic.mypy"]
+mypy_path = "backend"
+namespace_packages = true
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = [
+    "hatchet_sdk.*",
+    "sentence_transformers.*",
+    "transformers.*",
+    "pgvector.*",
+    "bentoml.*",
+    "peft.*",
+]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=app",
+    "--cov-report=term-missing",
+    "--cov-report=xml",
+]
+markers = [
+    "unit: fast, isolated tests with mocked I/O",
+    "integration: tests that hit a real DB or external service",
+    "eval: LLM-as-judge evaluations against the gold set",
+]
+
+[tool.coverage.run]
+source = ["backend/app"]
+branch = true
+omit = ["backend/alembic/*", "backend/tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]

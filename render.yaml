@@ -1,0 +1,75 @@
+# Render blueprint — single web service for the FundIQ backend.
+#
+# Render reads this file on first deploy + every push to the linked
+# branch. Env vars marked `sync: false` MUST be filled in via the Render
+# dashboard before the first deploy (Render won't sync secrets from
+# Git into the runtime, which is what we want — these are real keys).
+#
+# Postgres + Redis are external (Neon + Upstash) so this blueprint
+# stays free-tier-only on Render's side. Render's own Postgres add-on
+# doesn't include pgvector; using Neon avoids that and gives us a
+# generous free Postgres with pgvector preinstalled.
+
+services:
+  - type: web
+    name: fundiq-backend
+    runtime: docker
+    rootDir: ./
+    dockerfilePath: backend/Dockerfile
+    # Free plan = 512MB RAM, 0.1 CPU, sleeps after 15min idle, ~30s
+    # cold-start. Upgrade to `starter` ($7/mo) when constant uptime
+    # matters more than the bill.
+    plan: free
+    region: frankfurt  # closest to Neon EU + Upstash EU = lower DB latency
+
+    healthCheckPath: /health
+    # The image already runs `alembic upgrade head` before uvicorn
+    # starts (see backend/Dockerfile CMD), so we don't need a separate
+    # pre-deploy command — they're identical and the dockerised flow is
+    # the one CI will validate.
+
+    autoDeploy: true
+    branch: main
+
+    envVars:
+      # ---- App ----
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+
+      # ---- Data services (Neon + Upstash) ----
+      # Asyncpg runtime URL — paste from Neon's "psql / pooled" tab and
+      # change the scheme from `postgresql://` to `postgresql+asyncpg://`.
+      - key: DATABASE_URL
+        sync: false
+      # Psycopg URL used by alembic; same DB, just a different driver
+      # prefix. Paste the Neon URL with `postgresql+psycopg://`.
+      - key: ALEMBIC_DATABASE_URL
+        sync: false
+      # Upstash gives a `rediss://` URL — use that (TLS-enabled).
+      - key: REDIS_URL
+        sync: false
+
+      # ---- LLM + ranking providers ----
+      - key: GEMINI_API_KEY
+        sync: false  # Google AI Studio
+      - key: COHERE_API_KEY
+        sync: false  # Cohere dashboard
+
+      # ---- Auth (Clerk) ----
+      # Use the PRODUCTION-instance keys from Clerk's dashboard. The
+      # development-instance keys still work but show a yellow banner
+      # in the modal — confusing for users.
+      - key: CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: CLERK_JWKS_URL
+        sync: false
+
+      # ---- CORS ----
+      # Comma-separated list. Add your Vercel preview URLs too if you
+      # plan to test from PR-preview deploys.
+      - key: CORS_ORIGINS
+        sync: false

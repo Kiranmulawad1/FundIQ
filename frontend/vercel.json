@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "comment_about_this_file": "Most of Vercel's Next.js wiring is auto-detected — this file only locks down the parts where defaults bite us.",
+
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "installCommand": "npm ci",
+
+  "_": "regions: arrange the route handlers close to the backend (Frankfurt = Render's EU region). Pages still render from the user's nearest edge; this only affects route.ts handlers and SSR.",
+  "regions": ["fra1"],
+
+  "_2": "Route-handler config: increase max duration for the agent endpoints since they wait on Gemini + Cohere + the backend. Vercel Hobby caps at 60s, Pro at 300s — our 180s ceiling fits both as long as Gemini cooperates.",
+  "functions": {
+    "app/api/agents/recommend/route.ts": { "maxDuration": 60 },
+    "app/api/agents/recommend/stream/route.ts": { "maxDuration": 60 }
+  }
+}

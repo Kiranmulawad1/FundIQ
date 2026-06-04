@@ -1,0 +1,163 @@
+name: ci
+
+# Trigger on pushes to main and on every PR. Path filters at the job
+# level keep frontend-only changes from running pytest and vice versa.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel an in-flight CI run when a new commit lands on the same branch.
+# Cheaper, and avoids "old run failed, new run passed" race confusion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Path filter — figure out which subtrees changed so the backend and
+  # frontend jobs only run when they need to. PRs that only touch the
+  # other half (or just docs / CI itself) finish in seconds.
+  # ---------------------------------------------------------------------
+  changes:
+    name: detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.github/workflows/ci.yml'
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/ci.yml'
+
+  # ---------------------------------------------------------------------
+  # Backend — pytest against a real Postgres+pgvector + Redis.
+  # ---------------------------------------------------------------------
+  backend:
+    name: backend (pytest)
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Matches the local docker-compose so dev + CI see identical
+        # schema + extension surface (pgvector + pg_trgm).
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: fundiq
+          POSTGRES_PASSWORD: fundiq_dev
+          POSTGRES_DB: fundiq
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fundiq -d fundiq"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Runtime URL uses asyncpg; alembic uses psycopg. The Settings
+      # layer normalises whichever is provided, but providing both
+      # explicitly avoids surprises if config logic changes.
+      DATABASE_URL: postgresql+asyncpg://fundiq:fundiq_dev@localhost:5432/fundiq
+      ALEMBIC_DATABASE_URL: postgresql+psycopg://fundiq:fundiq_dev@localhost:5432/fundiq
+      REDIS_URL: redis://localhost:6379/0
+      ENVIRONMENT: test
+      LOG_LEVEL: WARNING
+      # Dummy values — auth + Gemini code paths read these on import but
+      # all integration tests stub the LLM, so real credentials aren't
+      # needed for CI to pass.
+      GEMINI_API_KEY: ci-dummy-key
+      CLERK_PUBLISHABLE_KEY: pk_test_dummy
+      CLERK_SECRET_KEY: sk_test_dummy
+      NEO4J_URI: bolt://localhost:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: neo4j_dummy
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: latest
+          enable-cache: true
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run alembic migrations
+        # alembic.ini lives under backend/; pyproject.toml is at repo
+        # root, so we run alembic with its own cwd but use uv from root.
+        working-directory: backend
+        # The tests' conftest assumes the schema already exists; the
+        # per-test SAVEPOINT pattern rolls back DML but never re-runs DDL.
+        run: uv run alembic upgrade head
+
+      - name: Run pytest
+        # pyproject.toml's testpaths = ["backend/tests"] is relative to
+        # repo root — running pytest from anywhere else fails to find
+        # the suite.
+        run: uv run pytest -q --ignore=backend/tests/integration/test_grant_enrichment.py
+
+  # ---------------------------------------------------------------------
+  # Frontend — TS type check + production build.
+  # ---------------------------------------------------------------------
+  frontend:
+    name: frontend (tsc + build)
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Production build
+        # `next build` runs the TS checker again internally; that's by
+        # design — surface failures both ways since they're cheap and
+        # the two paths can disagree on edge cases.
+        run: npm run build
+        env:
+          BACKEND_INTERNAL_URL: http://localhost:8000

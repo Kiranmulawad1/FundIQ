@@ -1,0 +1,43 @@
+# Keep the build context small + don't leak local secrets into images.
+#
+# Paths here are RELATIVE TO THE DOCKER BUILD CONTEXT (= repo root, see
+# render.yaml `rootDir`). If we ever move the Dockerfile, re-evaluate.
+
+# Local virtual envs + Python caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Editor + OS
+.vscode/
+.idea/
+.DS_Store
+
+# Git metadata — Render also strips this server-side, but locally it
+# shrinks the context send.
+.git/
+.github/
+
+# Frontend tree — backend image doesn't ship Next.js.
+frontend/
+
+# Local secrets — would silently leak into the image otherwise.
+.env
+.env.*
+*.local
+
+# Backend-only artefacts we don't ship in the image
+backend/.pytest_cache/
+backend/htmlcov/
+backend/coverage.xml
+
+# Eval outputs (large JSON dumps)
+ml/evals/results/
+
+# Docs that don't need to ship
+docs/
+*.md
