@@ -183,15 +183,20 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _require_secrets_in_production(self) -> Self:
-        """Production cannot boot without auth + observability wired up."""
+        """Production cannot boot without auth wired up.
+
+        Logfire is intentionally NOT required — app/main.py already
+        guards its instrumentation behind `if logfire_token`, so the
+        app degrades cleanly to structlog-only logging. Forcing a
+        Logfire token would block free-tier deploys that don't pay
+        for observability.
+        """
         if self.environment is Environment.PRODUCTION:
             missing: list[str] = []
             if self.clerk_secret_key is None:
                 missing.append("CLERK_SECRET_KEY")
             if self.clerk_jwks_url is None:
                 missing.append("CLERK_JWKS_URL")
-            if self.logfire_token is None:
-                missing.append("LOGFIRE_TOKEN")
             if missing:
                 msg = f"Missing required production secrets: {', '.join(missing)}"
                 raise ValueError(msg)
