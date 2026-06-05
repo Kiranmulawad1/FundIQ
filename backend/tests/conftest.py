@@ -48,6 +48,14 @@ for _var in (
 ):
     os.environ[_var] = ""
 
+# Pop ALEMBIC_DATABASE_URL so test_config.py can exercise the derive-from-
+# DATABASE_URL code path. In CI we set ALEMBIC_DATABASE_URL explicitly for
+# the alembic-upgrade step, but the unit test wants to assert that the
+# model_validator computes it when absent. Pydantic-settings reads process
+# env even with _env_file=None, so the only reliable way is to remove it
+# from the environment at conftest load.
+os.environ.pop("ALEMBIC_DATABASE_URL", None)
+
 
 @pytest.fixture(scope="session")
 def settings():  # type: ignore[no-untyped-def]
