@@ -111,6 +111,21 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Enable Postgres extensions
+        # The `pgvector/pgvector:pg16` service image ships the .so files
+        # but GH Actions service containers don't run init SQL. The first
+        # alembic migration creates a `VECTOR(1024)` column, so we have
+        # to CREATE EXTENSION before alembic touches the DB. Locally
+        # this runs via infra/compose/postgres-init.sql on first boot.
+        run: |
+          uv run python -c "
+          import psycopg
+          with psycopg.connect('postgresql://fundiq:fundiq_dev@localhost:5432/fundiq', autocommit=True) as conn:
+              conn.execute('CREATE EXTENSION IF NOT EXISTS vector')
+              conn.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm')
+              print('extensions ready')
+          "
+
       - name: Run alembic migrations
         # alembic.ini lives under backend/; pyproject.toml is at repo
         # root, so we run alembic with its own cwd but use uv from root.
