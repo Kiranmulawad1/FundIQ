@@ -38,6 +38,10 @@ backend/coverage.xml
 # Eval outputs (large JSON dumps)
 ml/evals/results/
 
-# Docs that don't need to ship
+# Docs that don't need to ship.
+# Note: README.md is allow-listed below because pyproject.toml's
+# `readme = "README.md"` makes hatchling need it during the wheel build.
 docs/
 *.md
+!README.md
+!backend/README.md
