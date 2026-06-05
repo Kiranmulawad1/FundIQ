@@ -45,9 +45,13 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-# Now copy the source and install the project as a wheel.
+# Now copy the source and install the project as a real (non-editable)
+# wheel. `--no-editable` is the critical flag: uv's default is to install
+# the project pointing back at the source tree (a .pth in site-packages
+# pointing at /app/backend). The runtime stage only copies /opt/venv,
+# so that .pth would be dangling and `import app` would fail.
 COPY backend ./backend
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --no-editable
 
 # ---------------------------------------------------------------------------
 # Stage 2 — slim runtime. No build tools.
