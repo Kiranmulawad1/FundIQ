@@ -39,7 +39,9 @@ WORKDIR /app
 
 # Copy lockfile + manifest first so dep installs cache independently of
 # app source — only re-runs when pyproject.toml or uv.lock changes.
-COPY pyproject.toml uv.lock ./
+# README.md travels with pyproject.toml because pyproject declares
+# `readme = "README.md"` and hatchling reads it during the wheel build.
+COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Now copy the source and install the project as a wheel.
