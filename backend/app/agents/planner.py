@@ -27,54 +27,15 @@ from typing import TYPE_CHECKING
 from app.agents.llm import AgentLLMError
 from app.agents.state import AgentState, PlannerFacts, PlannerOutput
 from app.core.logging import get_logger
+from app.core.prompts import PromptFetchError, get_prompt
 
 if TYPE_CHECKING:
     from app.agents.llm import GeminiAgentClient
 
 logger = get_logger(__name__)
 
-PLANNER_PROMPT = """\
-You are the Planner in a multi-agent system that recommends EU and German
-startup funding grants. The user is a founder asking a question in free text.
-
-Your job:
-  1. Rewrite their question into a concise retrieval query (DE or EN to match
-     their language), suitable for semantic search over grant programme
-     descriptions. If a known startup profile is provided below, weave the
-     most query-relevant profile facts (sector, stage, federal_state,
-     funding_target) into the rewritten query so semantic search benefits
-     from them.
-  2. Combine the known profile (if any) with whatever the question itself
-     implies, and return the merged structured facts. Treat profile facts
-     as authoritative unless the question contradicts them. If the question
-     doesn't add or contradict anything, just echo the profile values.
-
-Allowed values:
-  sector: one of [deeptech, cleantech, health, biotech, saas, hardware,
-                  fintech, other] or null
-  stage: one of [idea, seed, growth] or null (idea = pre-revenue / pre-product,
-         seed = early traction, growth = scaling)
-  country: "DE" for Germany-specific programmes, "EU" for EU-wide, or null
-  federal_state: one of the 16 German Länder (e.g. "Bayern", "Baden-Württemberg",
-                 "Berlin", "Nordrhein-Westfalen") or null
-  funding_target_eur: integer EUR amount the founder wants, or null
-
-{profile_block}Founder question:
-{query}
-
-Return ONLY a JSON object with this exact shape:
-{{
-  "rewritten_query": "string — the search query",
-  "facts": {{
-    "sector": "deeptech" | "cleantech" | "health" | "biotech" | "saas" | "hardware" | "fintech" | "other" | null,
-    "stage": "idea" | "seed" | "growth" | null,
-    "country": "DE" | "EU" | null,
-    "federal_state": "string" | null,
-    "funding_target_eur": integer | null
-  }},
-  "rationale": "string — one short sentence explaining your fact extraction"
-}}
-No prose before or after. No markdown fences."""
+# Prompt lives in Langfuse under name "planner". Fetched via
+# app.core.prompts.get_prompt() at request time.
 
 
 def _render_profile_block(profile: dict[str, object] | None) -> str:
@@ -106,18 +67,20 @@ async def planner_node(
     profile = profile_raw if isinstance(profile_raw, dict) else None
     started = time.perf_counter()
     try:
+        compiled = get_prompt("planner").compile(
+            query=query,
+            profile_block=_render_profile_block(profile),
+        )
         out = await llm.respond_as(
             PlannerOutput,
-            prompt=PLANNER_PROMPT.format(
-                query=query,
-                profile_block=_render_profile_block(profile),
-            ),
+            prompt=compiled.text,
+            prompt_handle=compiled.langfuse_handle,
             temperature=0.3,
             # 512 occasionally truncates the JSON mid-string on Gemini 2.5 Flash
             # when the rationale runs long — 1024 buys generous headroom.
             max_output_tokens=1024,
         )
-    except AgentLLMError as e:
+    except (AgentLLMError, PromptFetchError) as e:
         logger.warning("agents.planner.fallback", error=str(e)[:200])
         # Fallback: use the original query, no facts.
         out = PlannerOutput(

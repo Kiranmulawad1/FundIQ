@@ -57,6 +57,35 @@ for _var in (
 os.environ.pop("ALEMBIC_DATABASE_URL", None)
 
 
+# Register stub prompts for the agent nodes. Production fetches these from
+# Langfuse; tests can't hit the network and shouldn't depend on Langfuse
+# being seeded. The stubs are intentionally minimal — agent code mostly
+# mocks the LLM call itself, but if it ever actually formats the prompt
+# (e.g. integration smoke), the placeholders are valid.
+def _register_prompt_stubs() -> None:
+    from app.core.prompts import set_test_override
+
+    set_test_override("planner", "PLANNER {{profile_block}} {{query}}")
+    set_test_override("scorer", "SCORER {{planner_json}} {{candidates_json}}")
+    set_test_override(
+        "writer",
+        "WRITER {{retry_block}} {{query}} {{planner_json}} {{candidates_json}} {{scorer_json}}",
+    )
+    set_test_override(
+        "critic",
+        "CRITIC {{query}} {{profile_block}} {{planner_json}} {{candidates_json}} "
+        "{{scorer_json}} {{writer_json}}",
+    )
+    set_test_override("hyde", "HYDE {{query}}")
+    set_test_override(
+        "enrichment",
+        "ENRICHMENT {{title}} {{summary}} {{body_excerpt}} {{excerpt_chars}}",
+    )
+
+
+_register_prompt_stubs()
+
+
 @pytest.fixture(scope="session")
 def settings():  # type: ignore[no-untyped-def]
     """Cached settings, with the lru_cache cleared so env overrides take effect."""

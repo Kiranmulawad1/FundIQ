@@ -37,7 +37,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
 
 logger = get_logger(__name__)
 
@@ -124,7 +124,7 @@ def trace_request(
     user_id: str | None = None,
     session_id: str | None = None,
     metadata: dict[str, Any] | None = None,
-) -> Iterator[Any]:
+) -> Generator[Any, None, None]:
     """Open a top-level trace for one agent request. Generations and
     spans created inside the `with` block automatically attach.
 
@@ -161,10 +161,17 @@ def record_generation(
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     metadata: dict[str, Any] | None = None,
+    prompt_handle: Any | None = None,
 ) -> None:
     """Log one LLM call. Called from `agents/llm.py` after each Gemini
     completion (streamed or not). Cheap when Langfuse is disabled —
     just a None check.
+
+    `prompt_handle` is the Langfuse `Prompt` object returned by
+    `core.prompts.get_prompt(...).compile(...)`. Passing it links the
+    generation to the exact prompt version in the Langfuse UI, which is
+    the whole point of moving prompts there — you can A/B versions and
+    see win-rate per prompt revision.
     """
     if _client is None:
         return
@@ -185,6 +192,7 @@ def record_generation(
             usage=usage,
             cost=cost,
             metadata=metadata or {},
+            prompt=prompt_handle,
         )
     except Exception as exc:  # noqa: BLE001
         # Never let telemetry break a real request.

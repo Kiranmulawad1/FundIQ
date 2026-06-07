@@ -29,6 +29,7 @@ from app.agents.state import (
     WriterOutput,
 )
 from app.core.logging import get_logger
+from app.core.prompts import CompiledPrompt, PromptFetchError, get_prompt
 
 if TYPE_CHECKING:
     from app.agents.llm import GeminiAgentClient
@@ -38,73 +39,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-WRITER_PROMPT = """\
-You are the Writer in a multi-agent grant-recommendation system. Given a
-founder's question, the Planner's extracted facts, a shortlist of
-candidate grant programmes from the Retriever, and the Scorer's
-per-candidate eligibility judgement, produce a concise, grounded
-recommendation.
-
-STRICT RULES — violating any of these is a failure:
-  1. Recommend ONLY grants from the candidate list below. Never invent or
-     reference grants by name that aren't in the list.
-  2. Each recommendation MUST cite a real grant_id from the list.
-  3. If no candidate is a plausible fit, return an empty `recommendations`
-     list and explain why in `summary`.
-  4. Speak in the founder's language (German or English) — match their
-     question's language.
-  5. If the question is ambiguous, surface up to 3 clarifying questions in
-     `questions_for_user`. Don't make them mandatory; the recommendations
-     should still be your best read of the current information.
-
-For each recommendation, the `rationale` is 2-3 sentences explaining
-WHY this programme fits (or partially fits). The `fit` field is a coarse
-honest judgement:
-  high   — clearly designed for this founder's situation
-  medium — plausible but with caveats (e.g. stage / sector mismatch)
-  low    — only a stretch fit; surface only if no better candidates exist
-
-`caveats` are concrete things the founder should verify before applying
-(deadlines, eligibility constraints, cofinancing requirements, etc.).
-
-{retry_block}Founder question:
-{query}
-
-Planner facts (may be partial — null fields mean "not specified"):
-{planner_json}
-
-Candidate grants (in retrieval rank order):
-{candidates_json}
-
-Scorer judgement (one entry per candidate; empty list means the Scorer
-fell back — use your own judgement and trust the candidate list):
-{scorer_json}
-
-When the Scorer provided judgements:
-  - Your `fit` field MUST match the Scorer's `fit_label` for that grant_id.
-  - Your `rationale` SHOULD cite specific strengths the Scorer noted.
-  - Your `caveats` SHOULD surface the Scorer's concerns (and any
-    `missing_info` items as clarifying questions for the user).
-  - Recommend candidates in order of `eligibility_score` (highest first),
-    not raw retrieval rank.
-
-Return ONLY a JSON object with this exact shape:
-{{
-  "summary": "string — 1-2 sentences",
-  "recommendations": [
-    {{
-      "grant_id": "UUID string — must match one of the candidates",
-      "grant_title": "string — must match the candidate's title",
-      "portal": "string — must match the candidate's portal value",
-      "source_url": "string — must match the candidate's source_url",
-      "fit": "high" | "medium" | "low",
-      "rationale": "string",
-      "caveats": ["string", ...]
-    }}
-  ],
-  "questions_for_user": ["string", ...]
-}}
-No prose before or after. No markdown fences."""
+# Prompt lives in Langfuse under name "writer".
 
 
 async def writer_node(
@@ -138,18 +73,18 @@ async def writer_node(
         logger.info("agents.writer.empty_candidates", elapsed_ms=elapsed_ms)
         return {"writer": out, "writer_ms": elapsed_ms, "writer_attempts": attempt}
 
-    prompt = build_writer_prompt(
-        query=query,
-        planner=planner,
-        candidates=candidates,
-        scorer=scorer,
-        critic_feedback=critic_feedback,
-    )
-
     try:
+        compiled = build_writer_prompt(
+            query=query,
+            planner=planner,
+            candidates=candidates,
+            scorer=scorer,
+            critic_feedback=critic_feedback,
+        )
         out = await llm.respond_as(
             WriterOutput,
-            prompt=prompt,
+            prompt=compiled.text,
+            prompt_handle=compiled.langfuse_handle,
             temperature=0.3,
             # 4096 occasionally truncates mid-string when the Writer expands
             # caveats across all 8 candidates. 8192 is well within Gemini
@@ -159,7 +94,7 @@ async def writer_node(
             max_output_tokens=8192,
         )
         out = _enforce_groundedness(out, candidates)
-    except AgentLLMError as e:
+    except (AgentLLMError, PromptFetchError) as e:
         logger.warning("agents.writer.fallback", error=str(e)[:200])
         out = _deterministic_fallback(candidates, error=str(e))
 
@@ -196,7 +131,7 @@ def build_writer_prompt(
     candidates: list[CandidateGrant],
     scorer: ScorerOutput,
     critic_feedback: list[CriticFinding] | None = None,
-) -> str:
+) -> CompiledPrompt:
     """Public helper so the streaming code path in api/routes/agents.py
     can reuse the exact same prompt the batch writer_node uses.
 
@@ -205,7 +140,7 @@ def build_writer_prompt(
     `critic_feedback` is non-None only on the retry attempt: the Writer
     is asked to address each finding by name.
     """
-    return WRITER_PROMPT.format(
+    return get_prompt("writer").compile(
         retry_block=_render_retry_block(critic_feedback),
         query=query,
         planner_json=planner.model_dump_json(indent=2),

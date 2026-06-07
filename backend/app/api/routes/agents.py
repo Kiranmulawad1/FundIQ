@@ -33,6 +33,7 @@ from app.agents.writer import (
     enforce_groundedness,
 )
 from app.core.auth import AuthenticatedUser
+from app.core.prompts import PromptFetchError
 from app.api.deps import OptionalUserDep, SessionDep
 from app.core.logging import get_logger
 from app.models.session import AgentSession
@@ -376,7 +377,7 @@ async def _stream_recommend(
                     critic.findings if (is_retry and critic and not critic.overall_pass)
                     else None
                 )
-                prompt = build_writer_prompt(
+                compiled = build_writer_prompt(
                     query=query,
                     planner=planner,
                     candidates=candidates,
@@ -386,7 +387,8 @@ async def _stream_recommend(
                 accumulated = ""
                 try:
                     async for chunk in llm.stream_text(
-                        prompt=prompt,
+                        prompt=compiled.text,
+                        prompt_handle=compiled.langfuse_handle,
                         temperature=0.3,
                         max_output_tokens=8192,
                     ):
@@ -395,7 +397,7 @@ async def _stream_recommend(
 
                     writer = WriterOutput.model_validate_json(accumulated)
                     writer = enforce_groundedness(writer, candidates)
-                except (AgentLLMError, ValueError) as e:
+                except (AgentLLMError, ValueError, PromptFetchError) as e:
                     logger.warning(
                         "agents.writer.stream.fallback",
                         error_type=type(e).__name__,

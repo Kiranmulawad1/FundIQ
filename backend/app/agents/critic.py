@@ -37,6 +37,7 @@ from app.agents.state import (
     WriterOutput,
 )
 from app.core.logging import get_logger
+from app.core.prompts import CompiledPrompt, PromptFetchError, get_prompt
 
 if TYPE_CHECKING:
     from app.agents.llm import GeminiAgentClient
@@ -45,61 +46,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-CRITIC_PROMPT = """\
-You are the Critic in a multi-agent grant-recommendation system. The
-Writer just produced a response. Audit it for quality and ground-truth
-faithfulness against the actual candidates and the Scorer's judgement.
-
-Check for these issue types:
-  - citation_faithfulness: A claim in a recommendation's `rationale` or
-    `caveats` that isn't supported by the candidate's title, summary, or
-    body_excerpt. This is the highest-stakes failure mode.
-  - fit_alignment: The Writer's `fit` field disagrees with the Scorer's
-    `fit_label` for the same grant_id.
-  - caveat_omission: The Scorer flagged a `concerns` item for a grant
-    the Writer recommended, but the Writer's `caveats` for that grant
-    don't mention it.
-  - language_mismatch: The Writer responded in a different language than
-    the founder used in their question.
-  - profile_misuse: A saved startup profile was provided and the Writer
-    asserted facts that contradict it (e.g. wrong country or stage).
-  - other: anything else clearly wrong that doesn't fit above.
-
-Be precise. Don't flag stylistic preferences. Don't flag the Writer for
-acknowledging uncertainty. If a recommendation is grounded and the fit
-labels line up, the response is good.
-
-Founder question:
-{query}
-
-{profile_block}Planner extracted facts:
-{planner_json}
-
-Candidate grants (the ONLY grounded source of truth — quotations must
-trace back to these summaries and body excerpts):
-{candidates_json}
-
-Scorer judgement (per-candidate eligibility):
-{scorer_json}
-
-Writer response (the artefact you're reviewing):
-{writer_json}
-
-Return ONLY a JSON object of this exact shape:
-{{
-  "overall_pass": boolean,
-  "summary": "string — one sentence",
-  "findings": [
-    {{
-      "type": "citation_faithfulness" | "fit_alignment" | "caveat_omission" | "language_mismatch" | "profile_misuse" | "other",
-      "severity": "high" | "medium" | "low",
-      "grant_id": "UUID string or null",
-      "message": "string — concrete and specific"
-    }}
-  ]
-}}
-Empty findings list means the Writer passed. No prose before or after.
-No markdown fences."""
+# Prompt lives in Langfuse under name "critic".
 
 
 def _render_candidates_for_critic(candidates: list[CandidateGrant]) -> str:
@@ -141,8 +88,8 @@ def build_critic_prompt(
     scorer: ScorerOutput,
     writer: WriterOutput,
     startup_profile: dict[str, object] | None,
-) -> str:
-    return CRITIC_PROMPT.format(
+) -> CompiledPrompt:
+    return get_prompt("critic").compile(
         query=query,
         profile_block=_render_profile_block(startup_profile),
         planner_json=planner.model_dump_json(indent=2),
@@ -177,25 +124,26 @@ async def critic_node(
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         return {"critic": out, "critic_ms": elapsed_ms}
 
-    prompt = build_critic_prompt(
-        query=query,
-        planner=planner,
-        candidates=candidates,
-        scorer=scorer,
-        writer=writer,
-        startup_profile=profile,
-    )
     try:
+        compiled = build_critic_prompt(
+            query=query,
+            planner=planner,
+            candidates=candidates,
+            scorer=scorer,
+            writer=writer,
+            startup_profile=profile,
+        )
         out = await llm.respond_as(
             CriticOutput,
-            prompt=prompt,
+            prompt=compiled.text,
+            prompt_handle=compiled.langfuse_handle,
             temperature=0.1,  # judgement should be deterministic
             # The findings list can stretch when the Writer is bad; 4096
             # is plenty since each finding is bounded to 500 chars.
             max_output_tokens=4096,
         )
         out = _enforce_grounded_findings(out, candidates)
-    except AgentLLMError as e:
+    except (AgentLLMError, PromptFetchError) as e:
         logger.warning("agents.critic.fallback", error=str(e)[:200])
         out = CriticOutput(
             overall_pass=True,  # advisory only — don't block the user

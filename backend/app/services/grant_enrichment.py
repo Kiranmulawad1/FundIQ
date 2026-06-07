@@ -28,6 +28,7 @@ from sqlalchemy import select
 
 from app.agents.llm import AgentLLMError
 from app.core.logging import get_logger
+from app.core.prompts import PromptFetchError, get_prompt
 from app.models import Grant
 from app.schemas.enrichment import CURRENT_ENRICHMENT_VERSION, GrantEnrichment
 
@@ -45,49 +46,7 @@ logger = get_logger(__name__)
 BODY_EXCERPT_CHARS = 3500
 
 
-ENRICHMENT_PROMPT = """\
-You are extracting structured metadata from a German / EU startup
-funding programme description. The page text mixes marketing copy with
-the actual eligibility criteria — your job is to pull out the structured
-facts so downstream agents don't have to re-parse the body every turn.
-
-Be conservative: only fill a field if the text clearly supports it. Do
-NOT invent eligibility criteria. Do NOT classify a federal_state unless
-the programme is explicitly regional.
-
-Allowed sector values:
-  deeptech, cleantech, health, biotech, saas, hardware, fintech, other
-(or null for sector-agnostic programmes)
-
-Allowed funding_form values:
-  grant   — non-repayable subsidy
-  loan    — repayable credit (KfW, regional banks)
-  equity  — direct equity investment / venture fund
-  stipend — personal living-cost grant
-  mixed   — combination (e.g. grant + cofinancing)
-  other   — anything that doesn't fit above
-
-Programme title:
-{title}
-
-Programme summary:
-{summary}
-
-Programme body excerpt (first {excerpt_chars} chars):
-{body_excerpt}
-
-Return ONLY a JSON object with this exact shape:
-{{
-  "sector": "deeptech" | "cleantech" | "health" | "biotech" | "saas" | "hardware" | "fintech" | "other" | null,
-  "secondary_sectors": ["..."] ,
-  "federal_state": "string or null",
-  "target_groups": ["..."],
-  "eligibility_criteria": ["..."],
-  "funding_phases": ["..."],
-  "funding_form": "grant" | "loan" | "equity" | "stipend" | "mixed" | "other",
-  "application_notes": "string"
-}}
-No prose before or after. No markdown fences."""
+# Prompt lives in Langfuse under name "enrichment".
 
 
 @dataclass(slots=True)
@@ -106,7 +65,7 @@ async def enrich_grant(
     or schema failure — callers decide whether to swallow or propagate.
     """
     body = (grant.body or "").strip()
-    prompt = ENRICHMENT_PROMPT.format(
+    compiled = get_prompt("enrichment").compile(
         title=grant.title,
         summary=grant.summary or "",
         body_excerpt=body[:BODY_EXCERPT_CHARS],
@@ -114,7 +73,8 @@ async def enrich_grant(
     )
     return await llm.respond_as(
         GrantEnrichment,
-        prompt=prompt,
+        prompt=compiled.text,
+        prompt_handle=compiled.langfuse_handle,
         temperature=0.2,
         # 8 lists × ~5 items × ~50 chars ≈ 2000 chars of payload; 4096
         # tokens leaves comfortable headroom for application_notes.
@@ -176,7 +136,7 @@ async def bulk_enrich(
         needs_delay = True
         try:
             enrichment = await enrich_grant(grant, llm=llm)
-        except AgentLLMError as e:
+        except (AgentLLMError, PromptFetchError) as e:
             logger.warning("enrich.failed", grant_id=gid, error=str(e)[:200])
             results.append(EnrichResult(grant_id=gid, status="failed", detail=str(e)[:300]))
             continue

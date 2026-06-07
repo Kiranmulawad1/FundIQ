@@ -29,29 +29,14 @@ import httpx
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.prompts import PromptFetchError, get_prompt
 
 if TYPE_CHECKING:
     pass
 
 logger = get_logger(__name__)
 
-# Single-shot prompt. Stays in code for now; will move to backend/prompts/
-# with semver tracking once we have more than one prompt in play.
-HYDE_PROMPT_TEMPLATE = """\
-You are an expert on European startup and SME funding programmes (EXIST, EIC,
-KfW, BMWK, regional development banks).
-
-A founder has asked the following question. Generate exactly THREE hypothetical
-funding-programme descriptions that would be strong matches to this question.
-Each description should be 2-3 sentences, written in the style of an official
-programme summary in the same language as the founder's question.
-
-Founder question:
-{query}
-
-Return ONLY a JSON object of the form:
-{{"descriptions": ["...", "...", "..."]}}
-No prose before or after. No markdown fences. No numbering."""
+# Prompt lives in Langfuse under name "hyde".
 
 GEMINI_GENERATE_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -105,11 +90,17 @@ class HyDEService:
             logger.warning("hyde.no_gemini_key")
             return [query]
 
+        try:
+            compiled = get_prompt("hyde").compile(query=query)
+        except PromptFetchError as e:
+            logger.warning("hyde.prompt_unavailable", error=str(e)[:200])
+            return [query]
+
         payload = {
             "contents": [
                 {
                     "role": "user",
-                    "parts": [{"text": HYDE_PROMPT_TEMPLATE.format(query=query)}],
+                    "parts": [{"text": compiled.text}],
                 }
             ],
             "generationConfig": {

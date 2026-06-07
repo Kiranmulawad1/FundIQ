@@ -210,6 +210,7 @@ class GeminiAgentClient:
         temperature: float = 0.3,
         max_output_tokens: int = 8192,
         json_mode: bool = True,
+        prompt_handle: object | None = None,
     ) -> AsyncIterator[str]:
         """Yield text chunks from Gemini's streamGenerateContent SSE.
 
@@ -313,6 +314,7 @@ class GeminiAgentClient:
                 "json_mode": json_mode,
                 "streaming": True,
             },
+            prompt_handle=prompt_handle,
         )
 
     async def respond_as(
@@ -322,6 +324,7 @@ class GeminiAgentClient:
         prompt: str,
         temperature: float = 0.4,
         max_output_tokens: int = 2048,
+        prompt_handle: object | None = None,
     ) -> T:
         """Ask Gemini for JSON parsable into `model_cls`.
 
@@ -391,6 +394,7 @@ class GeminiAgentClient:
                 "max_output_tokens": max_output_tokens,
                 "schema": model_cls.__name__,
             },
+            prompt_handle=prompt_handle,
         )
 
         try:

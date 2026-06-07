@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 from app.agents.llm import AgentLLMError
 from app.agents.state import AgentState, CandidateGrant, ScorerOutput
 from app.core.logging import get_logger
+from app.core.prompts import CompiledPrompt, PromptFetchError, get_prompt
 
 if TYPE_CHECKING:
     from app.agents.llm import GeminiAgentClient
@@ -42,52 +43,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-SCORER_PROMPT = """\
-You are the Eligibility Scorer in a multi-agent grant-recommendation system.
-Given the Planner's structured facts about the founder, and a shortlist of
-candidate grant programmes retrieved by the Retriever, produce a typed
-eligibility judgement FOR EACH candidate.
-
-Founder facts (may be partial — null fields mean "not specified"):
-{planner_json}
-
-Candidates:
-{candidates_json}
-
-For EACH candidate, return:
-  - grant_id (must match the candidate's grant_id exactly)
-  - eligibility_score: integer 0-100
-      90-100: clearly designed for this founder's situation
-      70-89:  strong fit, minor caveats
-      50-69:  plausible fit, real gaps to clarify
-      30-49:  stretch fit, would need exceptional case
-      0-29:   poor fit, only include if no better candidate exists
-  - fit_label: "high" | "medium" | "low"  (must align with the score)
-  - strengths: 1-3 concrete reasons this grant matches the founder's facts
-  - concerns: 1-3 things that might disqualify or weaken the fit
-  - missing_info: 0-2 things the Planner couldn't determine that would help
-                  us judge better (e.g. "Is the founder a current student?")
-
-STRICT:
-  - Score every candidate in the list (do not skip any).
-  - Use grant_ids from the candidate list — never invent new ones.
-  - Match the founder's language only in `strengths`/`concerns`/`missing_info`;
-    keep field names English.
-
-Return ONLY a JSON object of this exact shape:
-{{
-  "scores": [
-    {{
-      "grant_id": "UUID string",
-      "eligibility_score": integer,
-      "fit_label": "high" | "medium" | "low",
-      "strengths": ["string", ...],
-      "concerns": ["string", ...],
-      "missing_info": ["string", ...]
-    }}
-  ]
-}}
-No prose before or after. No markdown fences."""
+# Prompt lives in Langfuse under name "scorer".
 
 
 def render_candidates_for_scorer(candidates: list[CandidateGrant]) -> str:
@@ -123,8 +79,10 @@ def render_candidates_for_scorer(candidates: list[CandidateGrant]) -> str:
     return _json.dumps(out, ensure_ascii=False, indent=2)
 
 
-def build_scorer_prompt(*, planner: PlannerOutput, candidates: list[CandidateGrant]) -> str:
-    return SCORER_PROMPT.format(
+def build_scorer_prompt(
+    *, planner: PlannerOutput, candidates: list[CandidateGrant],
+) -> CompiledPrompt:
+    return get_prompt("scorer").compile(
         planner_json=planner.model_dump_json(indent=2),
         candidates_json=render_candidates_for_scorer(candidates),
     )
@@ -143,11 +101,12 @@ async def scorer_node(
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         return {"scorer": ScorerOutput(scores=[]), "scorer_ms": elapsed_ms}
 
-    prompt = build_scorer_prompt(planner=planner, candidates=candidates)
     try:
+        compiled = build_scorer_prompt(planner=planner, candidates=candidates)
         out = await llm.respond_as(
             ScorerOutput,
-            prompt=prompt,
+            prompt=compiled.text,
+            prompt_handle=compiled.langfuse_handle,
             temperature=0.2,  # deterministic judgement matters here
             # 4096 truncates the JSON mid-list when there are 6-8 candidates
             # with rich strengths/concerns. 8192 gives generous headroom on
@@ -155,7 +114,7 @@ async def scorer_node(
             max_output_tokens=8192,
         )
         out = _enforce_grounded_scores(out, candidates)
-    except AgentLLMError as e:
+    except (AgentLLMError, PromptFetchError) as e:
         logger.warning("agents.scorer.fallback", error=str(e)[:200])
         out = ScorerOutput(scores=[])
 
