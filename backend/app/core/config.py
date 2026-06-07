@@ -64,6 +64,8 @@ class Settings(BaseSettings):
         "anthropic_api_key",
         "gemini_api_key",
         "cohere_api_key",
+        "langfuse_public_key",
+        "langfuse_secret_key",
         "hf_token",
         "langsmith_api_key",
         "logfire_token",
@@ -74,6 +76,7 @@ class Settings(BaseSettings):
         # fire spuriously (e.g. fetching JWKS from "" → httpx ProtocolError).
         "clerk_publishable_key",
         "clerk_jwks_url",
+        "langfuse_host",
         mode="before",
     )
     @classmethod
@@ -117,6 +120,14 @@ class Settings(BaseSettings):
     langsmith_project: str = "fundiq"
     langsmith_tracing: bool = False
     logfire_token: SecretStr | None = None
+    # Langfuse — LLM tracing + cost tracking. Three values are required
+    # for the SDK to send anything; if any of them is unset the
+    # `core.observability` module short-circuits to a no-op. Free cloud
+    # tier covers 50k events/month which is comfortable headroom for the
+    # portfolio demo.
+    langfuse_public_key: SecretStr | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_host: str | None = None
 
     # ---------------- Database (Neon Postgres + pgvector) ----------------
     database_url: str = Field(..., description="Async SQLAlchemy URL (asyncpg driver).")

@@ -103,7 +103,18 @@ async def recommend(
     initial: dict[str, object] = {"query": body.query}
     if body.startup_profile is not None:
         initial["startup_profile"] = body.startup_profile.model_dump(mode="json")
-    state: AgentState = await graph.ainvoke(initial)  # type: ignore[assignment]
+
+    # One Langfuse trace per recommend call; LLM generations recorded
+    # inside the graph nodes attach to this trace automatically.
+    from app.core.observability import trace_request
+
+    with trace_request(
+        "agents.recommend",
+        user_id=user.id if user else None,
+        session_id=str(session_id),
+        metadata={"query": body.query[:500]},
+    ):
+        state: AgentState = await graph.ainvoke(initial)  # type: ignore[assignment]
 
     planner = state["planner"]
     writer = state["writer"]

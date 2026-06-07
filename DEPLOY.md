@@ -57,6 +57,9 @@ Before touching any platform, confirm:
    | `CLERK_SECRET_KEY` | Same |
    | `CLERK_JWKS_URL` | `https://<your-clerk-domain>.clerk.accounts.dev/.well-known/jwks.json` — find your domain on Clerk Dashboard → Frontend API |
    | `CORS_ORIGINS` | Your Vercel URL once it exists, e.g. `https://fundiq.vercel.app`. For now leave as `https://fundiq.vercel.app` and update after step 4. |
+   | `LANGFUSE_PUBLIC_KEY` | *(optional)* From https://cloud.langfuse.com → Settings → API Keys. Enables per-LLM-call tracing + cost dashboards. |
+   | `LANGFUSE_SECRET_KEY` | *(optional)* Same page. |
+   | `LANGFUSE_HOST` | *(optional)* `https://cloud.langfuse.com` for the EU instance, or `https://us.cloud.langfuse.com` for US. |
 
 5. Click **Create web service**. First build takes ~5-8 minutes (Docker layer download + `uv sync`). Watch the logs.
 6. Backend URL: `https://fundiq-backend.onrender.com` (or whatever Render assigned). Hit `/health` to confirm.

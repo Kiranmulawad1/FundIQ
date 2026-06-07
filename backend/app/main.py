@@ -67,6 +67,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logfire.instrument_fastapi(app, capture_headers=False)
         logger.info("logfire.instrumented")
 
+    # Langfuse — separate observability sink dedicated to LLM call traces.
+    # No-op if any of the three Langfuse env vars is unset.
+    from app.core.observability import init_langfuse
+
+    init_langfuse()
+
     # Scheduler:
     #   - off in tests (deterministic test runs; cron firing during tests
     #     would write to scrape_runs and hit the live network)
@@ -135,6 +141,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # call. Same teardown story.
         if app.state.agent_llm is not None:
             await app.state.agent_llm.__aexit__(None, None, None)
+        # Flush Langfuse buffer before the worker exits — otherwise the
+        # tail of the LLM-trace timeline gets dropped on Render restarts.
+        from app.core.observability import shutdown_langfuse
+
+        await shutdown_langfuse()
         await app.state.redis.aclose()
         await dispose_engine()
 

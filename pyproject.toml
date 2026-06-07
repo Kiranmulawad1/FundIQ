@@ -69,6 +69,10 @@ dependencies = [
     # logfire transitively imports `importlib_metadata` (backport package)
     # rather than stdlib `importlib.metadata` on 3.13 — pin it explicitly.
     "importlib-metadata>=8.5,<9.0",
+    # Langfuse — LLM-call observability. The init helper in
+    # core.observability no-ops when env vars are unset, so this is a
+    # hard dep but a soft runtime feature.
+    "langfuse>=2.50,<3.0",
 
     # --- Utilities ---
     "tenacity>=9.0,<10.0",  # retries with backoff + jitter
