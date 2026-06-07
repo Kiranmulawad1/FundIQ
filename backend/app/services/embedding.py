@@ -33,13 +33,13 @@ Dim contract:
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import random
 from typing import TYPE_CHECKING, Literal
 
 import httpx
 import orjson
+
+from app.core.http_retry import post_with_backoff
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -66,12 +66,6 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 # 100 per call, but smaller batches keep latency bounded for the
 # retriever's single-query path and amortise nicely across the ETL.
 MAX_BATCH = 32
-
-# Backoff schedule for transient API failures (429 throttle, 503 unavail).
-# Capped so a real outage doesn't make the request hang forever; the
-# retriever has its own timeout above this.
-_RETRY_STATUSES = {429, 500, 502, 503, 504}
-_RETRY_DELAYS_SECONDS = (1.5, 4.0, 10.0)  # 3 retries → ~15.5s max wait
 
 
 class EmbeddingService:
@@ -179,7 +173,9 @@ class EmbeddingService:
                     for i in chunk
                 ]
                 payload = {"requests": requests}
-                r = await self._post_with_backoff(client, url, payload)
+                r = await post_with_backoff(
+                    client, url, json=payload, label="embedding.gemini"
+                )
                 body = r.json()
                 embeddings = body.get("embeddings", [])
                 if len(embeddings) != len(chunk):
@@ -223,47 +219,6 @@ class EmbeddingService:
             self._client = httpx.AsyncClient(timeout=self._timeout)
             self._owns_client = True
         return self._client
-
-    @staticmethod
-    async def _post_with_backoff(
-        client: httpx.AsyncClient,
-        url: str,
-        payload: dict,
-    ) -> httpx.Response:
-        """Retry on Gemini throttles (429) and transient 5xx. The Gemini
-        free tier is bursty — a single 429 doesn't mean the request is
-        bad, just that we got unlucky in the rate window.
-        """
-        last_exc: Exception | None = None
-        for attempt, base_delay in enumerate((*_RETRY_DELAYS_SECONDS, None)):
-            try:
-                r = await client.post(url, json=payload)
-                if r.status_code in _RETRY_STATUSES and base_delay is not None:
-                    logger.warning(
-                        "embedding.gemini.retry",
-                        attempt=attempt + 1,
-                        status=r.status_code,
-                        delay_seconds=base_delay,
-                    )
-                    # Honour Retry-After if Gemini sets it; otherwise
-                    # exponential with jitter.
-                    retry_after = r.headers.get("retry-after")
-                    if retry_after and retry_after.isdigit():
-                        await asyncio.sleep(float(retry_after))
-                    else:
-                        await asyncio.sleep(base_delay + random.uniform(0, 0.5))
-                    continue
-                r.raise_for_status()
-                return r
-            except httpx.HTTPStatusError as exc:
-                # Non-retryable status — surface to caller.
-                last_exc = exc
-                if exc.response.status_code not in _RETRY_STATUSES or base_delay is None:
-                    raise
-        if last_exc is not None:
-            raise last_exc
-        msg = "embedding retry loop exhausted without a response"
-        raise RuntimeError(msg)
 
     @staticmethod
     def _api_key() -> str:

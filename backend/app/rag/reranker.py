@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from app.core.config import get_settings
+from app.core.http_retry import post_with_backoff
 from app.core.logging import get_logger
 
 if TYPE_CHECKING:
@@ -108,15 +109,16 @@ class RerankerService:
             "top_n": len(passages),
         }
         try:
-            r = await client.post(
+            r = await post_with_backoff(
+                client,
                 COHERE_RERANK_URL,
                 json=payload,
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
+                label="rerank.cohere",
             )
-            r.raise_for_status()
         except httpx.HTTPError as e:
             logger.warning(
                 "rerank.cohere_failed",

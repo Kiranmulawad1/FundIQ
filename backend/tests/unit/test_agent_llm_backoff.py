@@ -172,5 +172,34 @@ async def test_post_gives_up_after_max_retries(
     assert len(sleep_calls) == MAX_RATE_LIMIT_RETRIES
 
 
+@pytest.mark.asyncio
+async def test_post_retries_on_503_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient 5xx (Gemini "service unavailable") is retried the same
+    way as 429. Regression: a real 503 in production fell through to the
+    degraded fallback because this path was 429-only.
+    """
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(llm_module.asyncio, "sleep", fake_sleep)
+
+    transport = _Scripted429Transport(iter([
+        (503, {}),
+        (200, {}),
+    ]))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        r = await _post_with_rate_limit_retry(
+            client, "http://t/x", json_payload={"a": 1},
+        )
+
+    assert r.status_code == 200
+    assert transport.calls == 2
+    assert sleep_calls == [RATE_LIMIT_FALLBACK_DELAYS[0]]
+
+
 async def _fail_sleep(_seconds: float) -> None:
     raise AssertionError("asyncio.sleep should not be called on the success path")

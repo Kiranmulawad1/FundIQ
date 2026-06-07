@@ -59,17 +59,23 @@ async def _post_with_rate_limit_retry(
     *,
     json_payload: Mapping[str, Any],
 ) -> httpx.Response:
-    """POST and, on 429, sleep + retry up to MAX_RATE_LIMIT_RETRIES times.
+    """POST with retries on 429 AND transient 5xx, up to MAX_RATE_LIMIT_RETRIES.
 
     Returns the final response (which may still be a non-2xx — the caller
-    is responsible for raise_for_status). 5xx errors are NOT retried here
-    on purpose; they bubble up to the existing tenacity-free `try/except`
-    in the caller so we don't double-retry.
+    is responsible for raise_for_status).
+
+    Why we now retry 5xx too:
+      Until 2026-06 this helper only retried 429 (rate limit). When
+      Gemini briefly 503'd a Writer call in production the agent fell
+      straight through to the degraded retrieval-only fallback, even
+      though a single retry would have succeeded. Treating 5xx the same
+      as 429 closes that gap — both indicate transient upstream pain
+      that the next attempt is likely to clear.
     """
     last_response: httpx.Response | None = None
     for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
         last_response = await client.post(url, json=json_payload)
-        if last_response.status_code != 429:
+        if last_response.status_code not in _RETRYABLE_STATUSES:
             return last_response
         if attempt >= MAX_RATE_LIMIT_RETRIES:
             break
@@ -78,8 +84,9 @@ async def _post_with_rate_limit_retry(
             or RATE_LIMIT_FALLBACK_DELAYS[min(attempt, len(RATE_LIMIT_FALLBACK_DELAYS) - 1)]
         )
         logger.warning(
-            "agent.llm.rate_limited",
+            "agent.llm.transient_failure",
             attempt=attempt + 1,
+            status=last_response.status_code,
             sleeping_s=delay,
         )
         await asyncio.sleep(delay)
@@ -109,7 +116,7 @@ async def _sleep_for_rate_limit_only(
         # reading status. httpx will buffer at most one chunk — cheap.
         probe = await client.post(url, json=json_payload)
         try:
-            if probe.status_code != 429:
+            if probe.status_code not in _RETRYABLE_STATUSES:
                 return
             if attempt >= MAX_RATE_LIMIT_RETRIES:
                 return
@@ -120,8 +127,9 @@ async def _sleep_for_rate_limit_only(
                 ]
             )
             logger.warning(
-                "agent.llm.stream_rate_limited",
+                "agent.llm.stream_transient_failure",
                 attempt=attempt + 1,
+                status=probe.status_code,
                 sleeping_s=delay,
             )
             await asyncio.sleep(delay)
@@ -145,6 +153,9 @@ GEMINI_GENERATE_URL = (
 # capped at MAX_RATE_LIMIT_RETRIES attempts.
 MAX_RATE_LIMIT_RETRIES = 3
 RATE_LIMIT_FALLBACK_DELAYS = (5.0, 15.0, 45.0)
+# Statuses that a retry will plausibly clear. 4xx other than 429 are the
+# caller's bug — surfacing those immediately avoids masking real errors.
+_RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 # Above this Retry-After value we give up — the daily quota is probably
 # exhausted and the caller's better off failing fast than blocking for
 # 10+ minutes inside one request.
@@ -237,6 +248,11 @@ class GeminiAgentClient:
             self._owns_client = True
 
         url = f"{GEMINI_STREAM_URL}?alt=sse&key={api_key}"
+        # Buffers for the trailing Langfuse record_generation call. Even
+        # though we yield chunks live, we accumulate the full text so the
+        # Langfuse UI can show the complete response.
+        full_text_parts: list[str] = []
+        last_usage: dict[str, int] = {}
         try:
             # Sleep + retry on 429 BEFORE the streaming context opens. We
             # can't gracefully retry mid-stream (already yielded chunks
@@ -261,8 +277,14 @@ class GeminiAgentClient:
                         # next chunk usually re-emits the full delta.
                         logger.debug("agent.llm.stream_chunk_bad_json", raw=data[:200])
                         continue
+                    # Gemini puts usage on the final chunk; keep the last
+                    # one we see so we record real numbers, not None.
+                    usage = chunk.get("usageMetadata")
+                    if isinstance(usage, dict):
+                        last_usage = usage
                     text = _extract_text(chunk)
                     if text:
+                        full_text_parts.append(text)
                         yield text
         except httpx.HTTPError as e:
             scrubbed = _scrub(str(e))
@@ -272,6 +294,26 @@ class GeminiAgentClient:
                 error=scrubbed[:200],
             )
             raise AgentLLMError(f"Gemini stream failed: {scrubbed}") from e
+
+        # Stream completed cleanly — record one Langfuse generation with
+        # the full assembled text. We do this in the success path only so
+        # partial-failure streams don't pollute the trace.
+        from app.core.observability import record_generation
+
+        record_generation(
+            name="gemini.stream_text",
+            model="gemini-2.5-flash",
+            input=prompt,
+            output="".join(full_text_parts),
+            input_tokens=last_usage.get("promptTokenCount"),
+            output_tokens=last_usage.get("candidatesTokenCount"),
+            metadata={
+                "temperature": temperature,
+                "max_output_tokens": max_output_tokens,
+                "json_mode": json_mode,
+                "streaming": True,
+            },
+        )
 
     async def respond_as(
         self,
@@ -331,6 +373,25 @@ class GeminiAgentClient:
         text = _extract_text(data)
         if not text:
             raise AgentLLMError("Gemini returned empty content.")
+
+        # Record the generation to Langfuse before parsing — the raw text
+        # is the most useful trace artefact even when JSON parsing fails.
+        from app.core.observability import record_generation
+
+        usage = data.get("usageMetadata") or {}
+        record_generation(
+            name=f"gemini.respond_as.{model_cls.__name__}",
+            model="gemini-2.5-flash",
+            input=prompt,
+            output=text,
+            input_tokens=usage.get("promptTokenCount"),
+            output_tokens=usage.get("candidatesTokenCount"),
+            metadata={
+                "temperature": temperature,
+                "max_output_tokens": max_output_tokens,
+                "schema": model_cls.__name__,
+            },
+        )
 
         try:
             obj = json.loads(_strip_fences(text))
