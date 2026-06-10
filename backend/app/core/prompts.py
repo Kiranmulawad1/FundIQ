@@ -30,8 +30,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from app.core import observability as _obs
 from app.core.logging import get_logger
-from app.core.observability import _client as _langfuse_client
 
 if TYPE_CHECKING:
     pass
@@ -94,7 +94,12 @@ def get_prompt(name: str, *, label: str = "production") -> _PromptHandle:
     if cache_key in _cache:
         return _cache[cache_key]
 
-    if _langfuse_client is None:
+    # Look up the Langfuse client via the observability module so we see
+    # the live binding. A `from app.core.observability import _client`
+    # at module level would capture the pre-init value (None) and the
+    # later reassignment by `init_langfuse()` wouldn't propagate here.
+    client = _obs._client
+    if client is None:
         msg = (
             f"Cannot fetch prompt '{name}': Langfuse is not configured. "
             f"Set LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST or register a test "
@@ -103,7 +108,7 @@ def get_prompt(name: str, *, label: str = "production") -> _PromptHandle:
         raise PromptFetchError(msg)
 
     try:
-        prompt_obj = _langfuse_client.get_prompt(name, label=label)
+        prompt_obj = client.get_prompt(name, label=label)
     except Exception as exc:  # noqa: BLE001 — Langfuse SDK raises a variety
         msg = f"Langfuse get_prompt failed for '{name}': {exc}"
         logger.warning("prompts.fetch_failed", name=name, error=str(exc)[:200])
